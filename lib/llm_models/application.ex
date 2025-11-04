@@ -7,6 +7,8 @@ defmodule LlmModels.Application do
 
   @impl true
   def start(_type, _args) do
+    LlmModels.load()
+
     children = [
       # Starts a worker by calling: LlmModels.Worker.start_link(arg)
       # {LlmModels.Worker, arg}

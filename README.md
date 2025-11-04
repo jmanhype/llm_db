@@ -13,9 +13,9 @@ Fast, persistent_term-backed LLM model metadata catalog with explicit refresh co
 
 ### Why LlmModels?
 
-- **Packaged snapshot**: Ships with model data embedded at compile time—no network required by default
+- **Packaged snapshot**: Ships with model data—no network required by default
 - **Fast queries**: O(1), lock-free reads via `:persistent_term`
-- **Explicit refresh**: Manual updates only via Mix tasks (`mix llm_models.pull`, `mix llm_models.activate`)
+- **Explicit refresh**: Manual updates only via `mix llm_models.pull`
 - **Capability-based selection**: Find models by features (tools, JSON mode, streaming, etc.)
 - **Canonical spec parsing**: Owns "provider:model" format parsing and resolution
 - **Flexible overrides**: Configure via `config.exs` or custom behaviour modules
@@ -43,39 +43,75 @@ end
 ## Quick Start
 
 ```elixir
-# Load the catalog (run once at startup)
-{:ok, _snapshot} = LlmModels.load()
+# Get all providers as structs (catalog loads automatically at startup)
+providers = LlmModels.providers()
+#=> [%LlmModels.Provider{id: :anthropic, ...}, ...]
 
-# List available providers
-[:anthropic, :openai, :google_vertex] = LlmModels.list_providers()
+# Get a specific model
+{:ok, model} = LlmModels.model("openai:gpt-4o-mini")
+#=> {:ok, %LlmModels.Model{id: "gpt-4o-mini", provider: :openai, ...}}
+
+# Access model properties
+model.capabilities.tools.enabled  #=> true
+model.cost.input                  #=> 0.15
+model.limits.context              #=> 128000
 
 # Find models with specific capabilities
 {:ok, {:openai, "gpt-4o-mini"}} = LlmModels.select(
   require: [chat: true, tools: true, json_native: true],
   prefer: [:openai, :anthropic]
 )
+```
 
-# Parse and resolve model specs
-{:ok, {:openai, "gpt-4o-mini"}} = LlmModels.parse_spec("openai:gpt-4o-mini")
-{:ok, {provider, id, model}} = LlmModels.resolve("openai:gpt-4o-mini")
+## Data Structures
 
-# Check capabilities
-caps = LlmModels.capabilities({:openai, "gpt-4o-mini"})
-caps.tools.enabled       #=> true
-caps.json.native         #=> true
-caps.streaming.text      #=> true
+### Provider Struct
+
+The `LlmModels.Provider` struct represents an LLM provider with Zoi validation:
+
+```elixir
+%LlmModels.Provider{
+  id: :openai,
+  name: "OpenAI",
+  base_url: "https://api.openai.com",
+  env: ["OPENAI_API_KEY"],
+  doc: "https://platform.openai.com/docs",
+  extra: %{}  # Additional provider-specific metadata
+}
+```
+
+### Model Struct
+
+The `LlmModels.Model` struct represents an LLM model with complete metadata:
+
+```elixir
+%LlmModels.Model{
+  id: "gpt-4o-mini",
+  provider: :openai,
+  name: "GPT-4o mini",
+  family: "gpt-4o",
+  limits: %{context: 128000, output: 16384},
+  cost: %{input: 0.15, output: 0.60},
+  capabilities: %{
+    chat: true,
+    tools: %{enabled: true, streaming: true},
+    json: %{native: true, schema: true},
+    streaming: %{text: true, tool_calls: true}
+  },
+  tags: ["fast", "efficient"],
+  deprecated?: false,
+  aliases: ["gpt-4-mini"],
+  extra: %{}
+}
 ```
 
 ## Usage
 
 ### Loading the Catalog
 
-The catalog must be loaded before querying. Typically done once at application startup:
+The catalog loads automatically when your application starts. You can also reload it manually:
 
 ```elixir
-# Load with defaults
-{:ok, snapshot} = LlmModels.load()
-
 # Reload with last-known options
 :ok = LlmModels.reload()
 
@@ -89,36 +125,34 @@ epoch = LlmModels.epoch()
 ### Querying Providers
 
 ```elixir
-# List all providers
-providers = LlmModels.list_providers()
-#=> [:anthropic, :google_vertex, :openai]
+# Get all providers as structs
+providers = LlmModels.providers()
+#=> [%LlmModels.Provider{id: :anthropic, ...}, %LlmModels.Provider{id: :openai, ...}]
 
-# Get provider metadata
+# Get a specific provider
 {:ok, provider} = LlmModels.get_provider(:openai)
+#=> {:ok, %LlmModels.Provider{...}}
+
 provider.name        #=> "OpenAI"
 provider.base_url    #=> "https://api.openai.com"
 provider.env         #=> ["OPENAI_API_KEY"]
+
+# List provider IDs only
+provider_ids = LlmModels.list_providers()
+#=> [:anthropic, :google_vertex, :openai]
 ```
 
 ### Querying Models
 
 ```elixir
-# List all models for a provider
-models = LlmModels.list_models(:openai)
+# Get a model by spec string
+{:ok, model} = LlmModels.model("openai:gpt-4o-mini")
+#=> {:ok, %LlmModels.Model{...}}
 
-# Filter by required capabilities
-models = LlmModels.list_models(:openai,
-  require: [tools: true, json_native: true]
-)
-
-# Exclude models with specific capabilities
-models = LlmModels.list_models(:openai,
-  require: [tools: true],
-  forbid: [streaming_tool_calls: true]
-)
-
-# Get a specific model
+# Or by provider and ID
 {:ok, model} = LlmModels.get_model(:openai, "gpt-4o-mini")
+
+# Access model properties
 model.id                    #=> "gpt-4o-mini"
 model.provider              #=> :openai
 model.family                #=> "gpt-4o"
@@ -126,6 +160,17 @@ model.limits.context        #=> 128000
 model.limits.output         #=> 16384
 model.cost.input            #=> 0.15 (per 1M tokens)
 model.cost.output           #=> 0.60 (per 1M tokens)
+model.capabilities.tools.enabled  #=> true
+model.capabilities.json.native    #=> true
+
+# List all models for a provider (returns maps, not structs)
+models = LlmModels.list_models(:openai)
+
+# Filter by capabilities
+models = LlmModels.list_models(:openai,
+  require: [tools: true, json_native: true],
+  forbid: [streaming_tool_calls: true]
+)
 ```
 
 ### Model Selection
@@ -179,25 +224,28 @@ end
 Parse and resolve model specifications:
 
 ```elixir
+# Parse "provider:model" spec and get Model struct
+{:ok, model} = LlmModels.model("openai:gpt-4o-mini")
+#=> {:ok, %LlmModels.Model{id: "gpt-4o-mini", provider: :openai, ...}}
+
+# Also accepts tuples
+{:ok, model} = LlmModels.model({:openai, "gpt-4o-mini"})
+
 # Parse provider identifier
 {:ok, :openai} = LlmModels.parse_provider("openai")
 {:ok, :google_vertex} = LlmModels.parse_provider("google-vertex")
 {:error, :unknown_provider} = LlmModels.parse_provider("invalid")
 
-# Parse "provider:model" spec
+# Parse spec to tuple (for backwards compatibility)
 {:ok, {:openai, "gpt-4o-mini"}} = LlmModels.parse_spec("openai:gpt-4o-mini")
 {:error, :invalid_format} = LlmModels.parse_spec("no-colon")
 
-# Resolve spec to full model record
-{:ok, {provider, id, model}} = LlmModels.resolve("openai:gpt-4o-mini")
-{:ok, {provider, id, model}} = LlmModels.resolve({:openai, "gpt-4o-mini"})
-
-# Resolve with scope (bare model ID)
-{:ok, {provider, id, model}} = LlmModels.resolve("gpt-4o-mini", scope: :openai)
+# Resolve spec to full model record (returns map, not struct)
+{:ok, {provider, id, model_map}} = LlmModels.resolve("openai:gpt-4o-mini")
 
 # Handle aliases
-{:ok, {provider, id, model}} = LlmModels.resolve("openai:gpt-4-mini")
-# Returns canonical ID "gpt-4o-mini"
+{:ok, model} = LlmModels.model("openai:gpt-4-mini")
+model.id  #=> "gpt-4o-mini" (canonical ID)
 ```
 
 ### Checking Availability
@@ -219,9 +267,9 @@ Configure `llm_models` in your `config/config.exs`:
 
 ```elixir
 config :llm_models,
-  # Embed snapshot at compile time (default: true)
-  compile_embed: true,
-  
+  # Embed snapshot at compile time (default: false)
+  compile_embed: false,
+
   # Provider and model overrides
   overrides: %{
     providers: [
@@ -244,10 +292,10 @@ config :llm_models,
       anthropic: ["claude-instant-*"]
     }
   },
-  
+
   # Custom overrides module (see below)
   overrides_module: MyApp.LlmModelOverrides,
-  
+
   # Global allow/deny filters
   allow: %{
     openai: :all,
@@ -256,7 +304,7 @@ config :llm_models,
   deny: %{
     openai: ["*-preview"]
   },
-  
+
   # Provider preference order
   prefer: [:openai, :anthropic, :google_vertex]
 ```
@@ -280,7 +328,7 @@ For more control, implement the `LlmModels.Overrides` behaviour:
 ```elixir
 defmodule MyApp.LlmModelOverrides do
   use LlmModels.Overrides
-  
+
   @impl true
   def providers do
     [
@@ -288,7 +336,7 @@ defmodule MyApp.LlmModelOverrides do
       %{id: :custom_provider, env: ["CUSTOM_API_KEY"], base_url: "https://custom.ai"}
     ]
   end
-  
+
   @impl true
   def models do
     [
@@ -307,7 +355,7 @@ defmodule MyApp.LlmModelOverrides do
       }
     ]
   end
-  
+
   @impl true
   def excludes do
     %{
@@ -328,50 +376,32 @@ The `use LlmModels.Overrides` macro provides default implementations (empty list
 
 ## Updating Model Data
 
-Model data is packaged at compile time by default. To update:
+Model data is packaged in the library. To update:
 
-### 1. Fetch Latest Data
+### Pull Latest Data
 
 ```bash
-# Fetch from models.dev
+# Fetch from models.dev and regenerate snapshot
 mix llm_models.pull
 
 # Fetch from custom URL
 mix llm_models.pull --url https://custom.source/api.json
-
-# Fetch to custom location
-mix llm_models.pull --out priv/llm_models/upstream.json
 ```
 
-This downloads and caches the upstream data to `priv/llm_models/upstream.json`.
+This downloads upstream data from models.dev (or custom URL), transforms it, validates it, merges with your config overrides, and writes:
 
-### 2. Activate the Update
+- `priv/llm_models/upstream.json` - Raw upstream data
+- `priv/llm_models/snapshot.json` - Processed snapshot
+- `lib/llm_models/generated/valid_providers.ex` - Generated provider atoms module
 
-```bash
-# Process and package the fetched data
-mix llm_models.activate
+### Reload in Development
 
-# Activate from custom source
-mix llm_models.activate --from priv/llm_models/upstream.json
-```
-
-This validates, normalizes, and writes `priv/llm_models/snapshot.json`.
-
-### 3. Reload (Development) or Recompile (Production)
-
-**Development:**
 ```elixir
-# Reload in development without recompiling
+# Reload catalog without recompiling
 LlmModels.reload()
 ```
 
-**Production:**
-```bash
-# Recompile to pick up new snapshot
-mix compile --force
-```
-
-When `compile_embed: true`, the snapshot is embedded at compile time via `@external_resource`, so changes trigger automatic recompilation.
+This re-reads the snapshot.json file and updates the `:persistent_term` storage.
 
 ## Architecture
 
@@ -389,10 +419,10 @@ The catalog is built through a seven-stage pipeline:
 
 ### Storage
 
-- **Compile-time embedding**: Snapshot is read at compile time when `compile_embed: true` (default)
-- **Runtime loading**: `LlmModels.load/1` merges sources and publishes to `:persistent_term`
+- **Runtime loading**: `LlmModels.load/1` reads snapshot, merges with config overrides, and publishes to `:persistent_term`
 - **Reads**: All queries use `:persistent_term.get(:llm_models_snapshot)` for O(1), lock-free access
 - **No ETS**: Simpler and faster with `:persistent_term`
+- **Optional compile-time embedding**: Set `compile_embed: true` to embed snapshot at compile time (default: false)
 
 ### Data Structures
 
@@ -406,40 +436,27 @@ Internally, the snapshot contains:
 
 ## Integration with ReqLLM
 
-`llm_models` was designed to power ReqLLM but can be used standalone:
-
-```elixir
-# In your application startup
-defmodule MyApp.Application do
-  use Application
-  
-  def start(_type, _args) do
-    # Load the catalog
-    {:ok, _} = LlmModels.load()
-    
-    children = [
-      # Your other children...
-    ]
-    
-    Supervisor.start_link(children, strategy: :one_for_one)
-  end
-end
-```
+`llm_models` was designed to power ReqLLM but can be used standalone. The catalog loads automatically when your application starts.
 
 In ReqLLM integration:
 
 ```elixir
-# Use LlmModels for provider registry
-{:ok, {provider, id, model}} = LlmModels.resolve("openai:gpt-4o-mini")
+# Get model struct
+{:ok, model} = LlmModels.model("openai:gpt-4o-mini")
 
-# Check capabilities
-caps = LlmModels.capabilities({provider, id})
+# Access model properties
+model.capabilities.tools.enabled    #=> true
+model.capabilities.streaming.text   #=> true
+model.cost.input                    #=> 0.15
 
-# Select best model
+# Select best model for requirements
 {:ok, {provider, id}} = LlmModels.select(
   require: [tools: true, streaming_text: true],
   prefer: [:openai]
 )
+
+# Then get the full model struct
+{:ok, model} = LlmModels.model({provider, id})
 ```
 
 ## API Reference
@@ -447,38 +464,44 @@ caps = LlmModels.capabilities({provider, id})
 ### Main Module: `LlmModels`
 
 **Lifecycle:**
+
 - `load/1` - Load catalog and publish to persistent_term
 - `reload/0` - Reload using last-known options
 - `snapshot/0` - Get current snapshot
 - `epoch/0` - Get current epoch
 
 **Lookup and Listing:**
-- `list_providers/0` - List all provider atoms
-- `get_provider/1` - Get provider metadata
-- `list_models/2` - List models with filters
-- `get_model/2` - Get specific model
-- `capabilities/1` - Get model capabilities
+
+- `providers/0` - Get all providers as Provider structs
+- `list_providers/0` - List provider IDs as atoms
+- `get_provider/1` - Get provider as Provider struct
+- `model/1` - Parse spec and get Model struct
+- `get_model/2` - Get model by provider and ID as Model struct
+- `list_models/2` - List models with filters (returns maps)
+- `capabilities/1` - Get model capabilities map
 - `allowed?/1` - Check if model passes filters
 
 **Selection:**
+
 - `select/1` - Select model by capability requirements
 
 **Spec Parsing:**
+
 - `parse_provider/1` - Parse provider identifier
-- `parse_spec/1` - Parse "provider:model" spec
+- `model/1` - Parse "provider:model" spec
 - `resolve/2` - Resolve spec to model record
 
 ### Behaviour: `LlmModels.Overrides`
 
 **Callbacks:**
+
 - `providers/0` - Return provider overrides
 - `models/0` - Return model overrides
 - `excludes/0` - Return exclusion patterns
 
 ### Mix Tasks
 
-- `mix llm_models.pull` - Fetch upstream data from models.dev
-- `mix llm_models.activate` - Process and package snapshot
+- `mix llm_models.pull` - Fetch latest data from models.dev and regenerate snapshot
 
 ## Design Principles
 

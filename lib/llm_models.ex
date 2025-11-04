@@ -14,10 +14,12 @@ defmodule LlmModels do
 
   ## Lookup and Listing
 
+  - `providers/0` - Get all providers as Provider structs
   - `list_providers/0` - List all provider atoms
-  - `get_provider/1` - Get provider metadata
+  - `get_provider/1` - Get provider metadata as Provider struct
   - `list_models/2` - List models for a provider with optional filters
-  - `get_model/2` - Get a specific model
+  - `get_model/2` - Get a specific model as Model struct
+  - `model/1` - Parse spec and get Model struct
   - `capabilities/1` - Get capabilities for a model spec
   - `allowed?/1` - Check if a model passes allow/deny filters
 
@@ -33,10 +35,10 @@ defmodule LlmModels do
 
   ## Examples
 
-      # Boot the catalog
-      {:ok, _} = LlmModels.load()
+      # Get providers as structs
+      providers = LlmModels.providers()
 
-      # List providers
+      # List provider atoms
       [:openai, :anthropic, :google_vertex] = LlmModels.list_providers()
 
       # List models with capability filters
@@ -45,8 +47,11 @@ defmodule LlmModels do
         forbid: [streaming_tool_calls: true]
       )
 
-      # Get a specific model
+      # Get a specific model struct
       {:ok, model} = LlmModels.get_model(:openai, "gpt-4o-mini")
+
+      # Parse spec and get model struct
+      {:ok, model} = LlmModels.model("openai:gpt-4o-mini")
 
       # Select a model matching requirements
       {:ok, {:openai, "gpt-4o-mini"}} = LlmModels.select(
@@ -59,7 +64,7 @@ defmodule LlmModels do
       {:ok, {provider, id, model}} = LlmModels.resolve("openai:gpt-4o-mini")
   """
 
-  alias LlmModels.{Engine, Store, Spec}
+  alias LlmModels.{Engine, Store, Spec, Provider, Model}
 
   @type provider :: atom()
   @type model_id :: String.t()
@@ -178,6 +183,35 @@ defmodule LlmModels do
   end
 
   @doc """
+  Returns all providers as Provider structs.
+
+  ## Returns
+
+  List of Provider structs, sorted alphabetically by provider ID.
+
+  ## Examples
+
+      providers = LlmModels.providers()
+      #=> [%LlmModels.Provider{id: :anthropic, ...}, ...]
+  """
+  @spec providers() :: [Provider.t()]
+  def providers do
+    case snapshot() do
+      nil ->
+        []
+
+      %{providers_by_id: providers_map} ->
+        providers_map
+        |> Map.values()
+        |> Enum.map(&Provider.new!/1)
+        |> Enum.sort_by(& &1.id)
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
   Gets provider metadata by provider atom.
 
   ## Parameters
@@ -186,7 +220,7 @@ defmodule LlmModels do
 
   ## Returns
 
-  - `{:ok, provider_map}` - Provider metadata
+  - `{:ok, provider}` - Provider struct
   - `:error` - Provider not found
 
   ## Examples
@@ -195,12 +229,20 @@ defmodule LlmModels do
       provider.name
       #=> "OpenAI"
   """
-  @spec get_provider(provider()) :: {:ok, map()} | :error
+  @spec get_provider(provider()) :: {:ok, Provider.t()} | :error
   def get_provider(provider) when is_atom(provider) do
     case snapshot() do
-      nil -> :error
-      %{providers_by_id: providers} -> Map.fetch(providers, provider)
-      _ -> :error
+      nil ->
+        :error
+
+      %{providers_by_id: providers} ->
+        case Map.fetch(providers, provider) do
+          {:ok, provider_map} -> {:ok, Provider.new!(provider_map)}
+          :error -> :error
+        end
+
+      _ ->
+        :error
     end
   end
 
@@ -262,7 +304,7 @@ defmodule LlmModels do
 
   ## Returns
 
-  - `{:ok, model}` - Model metadata
+  - `{:ok, model}` - Model struct
   - `:error` - Model not found
 
   ## Examples
@@ -270,7 +312,7 @@ defmodule LlmModels do
       {:ok, model} = LlmModels.get_model(:openai, "gpt-4o-mini")
       {:ok, model} = LlmModels.get_model(:openai, "gpt-4-mini")  # alias
   """
-  @spec get_model(provider(), model_id()) :: {:ok, map()} | :error
+  @spec get_model(provider(), model_id()) :: {:ok, Model.t()} | :error
   def get_model(provider, model_id) when is_atom(provider) and is_binary(model_id) do
     case snapshot() do
       nil ->
@@ -282,7 +324,10 @@ defmodule LlmModels do
         canonical_id = Map.get(snapshot.aliases_by_key, key, model_id)
         canonical_key = {provider, canonical_id}
 
-        Map.fetch(snapshot.models_by_key, canonical_key)
+        case Map.fetch(snapshot.models_by_key, canonical_key) do
+          {:ok, model_map} -> {:ok, Model.new!(model_map)}
+          :error -> :error
+        end
     end
   end
 
@@ -490,6 +535,48 @@ defmodule LlmModels do
           {:ok, {provider(), model_id()}}
           | {:error, :invalid_format | :unknown_provider | :bad_provider}
   defdelegate parse_spec(spec), to: Spec
+
+  @doc """
+  Parses a "provider:model" specification and returns the Model struct.
+
+  Convenience function that combines parse_spec/1 and get_model/2.
+
+  ## Parameters
+
+  - `spec` - String in "provider:model" format or {provider, model_id} tuple
+
+  ## Returns
+
+  - `{:ok, model}` - Model struct
+  - `{:error, :invalid_format}` - No ":" found
+  - `{:error, :unknown_provider}` - Provider not found
+  - `{:error, :not_found}` - Model not found
+
+  ## Examples
+
+      {:ok, model} = LlmModels.model("openai:gpt-4o-mini")
+      model.id
+      #=> "gpt-4o-mini"
+
+      {:ok, model} = LlmModels.model({:openai, "gpt-4o-mini"})
+  """
+  @spec model(String.t() | {provider(), model_id()}) ::
+          {:ok, Model.t()} | {:error, atom()}
+  def model(spec)
+
+  def model({provider, model_id}) when is_atom(provider) and is_binary(model_id) do
+    case get_model(provider, model_id) do
+      {:ok, model} -> {:ok, model}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  def model(spec) when is_binary(spec) do
+    case parse_spec(spec) do
+      {:ok, {provider, model_id}} -> model({provider, model_id})
+      {:error, _} = error -> error
+    end
+  end
 
   @doc """
   Resolves a model specification to a canonical model record.

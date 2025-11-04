@@ -7,20 +7,22 @@ defmodule LlmModels.NormalizeTest do
 
   describe "normalize_provider_id/1" do
     test "converts binary provider ID with hyphens to atom with underscores" do
-      assert {:ok, :google_vertex} = Normalize.normalize_provider_id("google-vertex")
-      assert {:ok, :azure_openai} = Normalize.normalize_provider_id("azure-openai")
-      assert {:ok, :anthropic_vertex} = Normalize.normalize_provider_id("anthropic-vertex")
+      assert {:ok, :google_vertex} = Normalize.normalize_provider_id("google-vertex", unsafe: true)
+      assert {:ok, :azure_openai} = Normalize.normalize_provider_id("azure-openai", unsafe: true)
+
+      assert {:ok, :anthropic_vertex} =
+               Normalize.normalize_provider_id("anthropic-vertex", unsafe: true)
     end
 
     test "converts binary provider ID with underscores to atom" do
-      assert {:ok, :google_vertex} = Normalize.normalize_provider_id("google_vertex")
-      assert {:ok, :some_provider} = Normalize.normalize_provider_id("some_provider")
+      assert {:ok, :google_vertex} = Normalize.normalize_provider_id("google_vertex", unsafe: true)
+      assert {:ok, :some_provider} = Normalize.normalize_provider_id("some_provider", unsafe: true)
     end
 
     test "converts simple binary provider ID to atom" do
-      assert {:ok, :openai} = Normalize.normalize_provider_id("openai")
-      assert {:ok, :anthropic} = Normalize.normalize_provider_id("anthropic")
-      assert {:ok, :cohere} = Normalize.normalize_provider_id("cohere")
+      assert {:ok, :openai} = Normalize.normalize_provider_id("openai", unsafe: true)
+      assert {:ok, :anthropic} = Normalize.normalize_provider_id("anthropic", unsafe: true)
+      assert {:ok, :cohere} = Normalize.normalize_provider_id("cohere", unsafe: true)
     end
 
     test "passes through already-atom providers unchanged" do
@@ -48,13 +50,13 @@ defmodule LlmModels.NormalizeTest do
     end
 
     test "handles mixed case provider IDs" do
-      assert {:ok, :OpenAI} = Normalize.normalize_provider_id("OpenAI")
-      assert {:ok, :Google_Vertex} = Normalize.normalize_provider_id("Google-Vertex")
+      assert {:ok, :OpenAI} = Normalize.normalize_provider_id("OpenAI", unsafe: true)
+      assert {:ok, :Google_Vertex} = Normalize.normalize_provider_id("Google-Vertex", unsafe: true)
     end
 
     test "handles alphanumeric provider IDs" do
-      assert {:ok, :provider123} = Normalize.normalize_provider_id("provider123")
-      assert {:ok, :abc_123_xyz} = Normalize.normalize_provider_id("abc-123-xyz")
+      assert {:ok, :provider123} = Normalize.normalize_provider_id("provider123", unsafe: true)
+      assert {:ok, :abc_123_xyz} = Normalize.normalize_provider_id("abc-123-xyz", unsafe: true)
     end
   end
 
@@ -71,7 +73,9 @@ defmodule LlmModels.NormalizeTest do
 
     test "handles provider with underscores" do
       model = %{provider: "azure_openai", id: "gpt-4-turbo"}
-      assert {:ok, {:azure_openai, "gpt-4-turbo"}} = Normalize.normalize_model_identity(model)
+
+      assert {:ok, {:azure_openai, "gpt-4-turbo"}} =
+               Normalize.normalize_model_identity(model, unsafe: true)
     end
 
     test "returns error when id is missing" do

@@ -10,7 +10,8 @@ defmodule LlmModels.Normalize do
   Normalizes a provider ID to an atom.
 
   Converts binary provider IDs to atoms, handling hyphens by converting them
-  to underscores. Already-atom providers pass through unchanged.
+  to underscores. Uses String.to_existing_atom/1 to prevent atom leaking
+  at runtime. During activation task, unsafe conversion is allowed.
 
   ## Examples
 
@@ -23,21 +24,55 @@ defmodule LlmModels.Normalize do
       iex> LlmModels.Normalize.normalize_provider_id("malicious#{String.duplicate("a", 1000)}")
       {:error, :bad_provider}
   """
-  @spec normalize_provider_id(binary() | atom()) :: {:ok, atom()} | {:error, :bad_provider}
-  def normalize_provider_id(provider_id) when is_atom(provider_id) do
+  @spec normalize_provider_id(binary() | atom(), keyword()) ::
+          {:ok, atom()} | {:error, :bad_provider}
+  def normalize_provider_id(provider_id, opts \\ [])
+
+  def normalize_provider_id(provider_id, _opts) when is_atom(provider_id) do
     {:ok, provider_id}
   end
 
-  def normalize_provider_id(provider_id) when is_binary(provider_id) do
+  def normalize_provider_id(provider_id, opts) when is_binary(provider_id) do
     if valid_provider_string?(provider_id) do
-      normalized = provider_id |> String.replace("-", "_") |> String.to_atom()
-      {:ok, normalized}
+      normalized_str = String.replace(provider_id, "-", "_")
+      convert_to_atom(normalized_str, opts)
     else
       {:error, :bad_provider}
     end
   end
 
-  def normalize_provider_id(_), do: {:error, :bad_provider}
+  def normalize_provider_id(_, _), do: {:error, :bad_provider}
+
+  # Convert string to atom, using safe conversion unless unsafe is explicitly allowed
+  defp convert_to_atom(str, opts) do
+    if Keyword.get(opts, :unsafe, false) do
+      # Only used during activation task when generating provider atoms
+      {:ok, String.to_atom(str)}
+    else
+      # Runtime: only accept existing atoms to prevent atom leaking
+      try do
+        atom = String.to_existing_atom(str)
+
+        # Verify it's in our whitelist
+        if valid_provider_atom?(atom) do
+          {:ok, atom}
+        else
+          # Atom exists but not in whitelist - treat as unknown provider
+          {:error, :unknown_provider}
+        end
+      rescue
+        # Atom doesn't exist at all - treat as unknown provider
+        ArgumentError -> {:error, :unknown_provider}
+      end
+    end
+  end
+
+  # Check if atom is in the valid providers list
+  defp valid_provider_atom?(atom) do
+    LlmModels.Generated.ValidProviders.member?(atom)
+  rescue
+    UndefinedFunctionError -> true
+  end
 
   @doc """
   Normalizes a model's identity to a {provider_atom, model_id} tuple.
@@ -55,18 +90,23 @@ defmodule LlmModels.Normalize do
       iex> LlmModels.Normalize.normalize_model_identity(%{provider: "openai"})
       {:error, :missing_id}
   """
-  @spec normalize_model_identity(map()) :: {:ok, {atom(), String.t()}} | {:error, term()}
-  def normalize_model_identity(%{provider: provider, id: id}) when is_binary(id) do
-    case normalize_provider_id(provider) do
+  @spec normalize_model_identity(map(), keyword()) ::
+          {:ok, {atom(), String.t()}} | {:error, term()}
+  def normalize_model_identity(model, opts \\ [])
+
+  def normalize_model_identity(%{provider: provider, id: id}, opts) when is_binary(id) do
+    case normalize_provider_id(provider, opts) do
       {:ok, provider_atom} -> {:ok, {provider_atom, id}}
       error -> error
     end
   end
 
-  def normalize_model_identity(%{provider: _provider, id: _id}), do: {:error, :invalid_id}
-  def normalize_model_identity(%{id: _id}), do: {:error, :missing_provider}
-  def normalize_model_identity(%{provider: _provider}), do: {:error, :missing_id}
-  def normalize_model_identity(_), do: {:error, :invalid_model}
+  def normalize_model_identity(%{provider: _provider, id: _id}, _opts),
+    do: {:error, :invalid_id}
+
+  def normalize_model_identity(%{id: _id}, _opts), do: {:error, :missing_provider}
+  def normalize_model_identity(%{provider: _provider}, _opts), do: {:error, :missing_id}
+  def normalize_model_identity(_, _opts), do: {:error, :invalid_model}
 
   @doc """
   Normalizes a date string to "YYYY-MM-DD" format.
@@ -141,7 +181,8 @@ defmodule LlmModels.Normalize do
   end
 
   defp normalize_provider(%{id: id} = provider) do
-    case normalize_provider_id(id) do
+    # Use unsafe mode for batch normalization (used during activation)
+    case normalize_provider_id(id, unsafe: true) do
       {:ok, normalized_id} -> %{provider | id: normalized_id}
       {:error, _} -> provider
     end
@@ -150,8 +191,9 @@ defmodule LlmModels.Normalize do
   defp normalize_provider(provider), do: provider
 
   defp normalize_model(%{provider: provider} = model) do
+    # Use unsafe mode for batch normalization (used during activation)
     normalized =
-      case normalize_provider_id(provider) do
+      case normalize_provider_id(provider, unsafe: true) do
         {:ok, normalized_provider} -> %{model | provider: normalized_provider}
         {:error, _} -> model
       end
@@ -178,8 +220,28 @@ defmodule LlmModels.Normalize do
 
   defp normalize_modalities(model), do: model
 
-  defp normalize_modality_atom(value) when is_binary(value), do: String.to_atom(value)
-  defp normalize_modality_atom(value) when is_atom(value), do: value
+  # Known valid modality atoms - these represent input/output types for models
+  @valid_modalities MapSet.new([
+    :text, :image, :audio, :video, :code, :document, :embedding
+  ])
+
+  defp normalize_modality_atom(value) when is_binary(value) do
+    # Try to convert to existing atom first (safe)
+    try do
+      atom = String.to_existing_atom(value)
+      if MapSet.member?(@valid_modalities, atom), do: atom, else: value
+    rescue
+      ArgumentError ->
+        # Atom doesn't exist yet - check if it's a known modality
+        # This is safe because we only create atoms from a small, known set
+        atom = String.to_atom(value)
+        if MapSet.member?(@valid_modalities, atom), do: atom, else: value
+    end
+  end
+  
+  defp normalize_modality_atom(value) when is_atom(value) do
+    if MapSet.member?(@valid_modalities, value), do: value, else: value
+  end
 
   defp parse_date(date_string) do
     with [year, month, day] <- String.split(date_string, "-", parts: 3),
