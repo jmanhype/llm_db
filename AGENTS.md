@@ -14,8 +14,8 @@
 ## Architecture
 
 - **Type**: Elixir library providing fast, persistent_term-backed LLM model metadata catalog
-- **Core modules**: `LlmModels` (main API), `LlmModels.Engine` (ETL pipeline), `LlmModels.Store` (persistent_term storage)
-- **Data structures**: `LlmModels.Provider`, `LlmModels.Model` with Zoi validation schemas in `lib/llm_models/schema/`
+- **Core modules**: `LLMModels` (main API), `LLMModels.Engine` (ETL pipeline), `LLMModels.Store` (persistent_term storage)
+- **Data structures**: `LLMModels.Provider`, `LLMModels.Model` with Zoi validation schemas in `lib/llm_models/schema/`
 - **Storage**: O(1) lock-free queries via `:persistent_term`, snapshot in `priv/llm_models/snapshot.json`
 - **ETL Pipeline**: Ingest → Normalize → Validate → Merge → Enrich → Filter → Index + Publish (7 stages)
 
