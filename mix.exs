@@ -48,6 +48,7 @@ defmodule LLMModels.MixProject do
 
   def application do
     [
+      mod: {LLMModels.Application, []},
       extra_applications: [:logger]
     ]
   end

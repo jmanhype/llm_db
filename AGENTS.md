@@ -19,6 +19,7 @@
 - **Data structures**: `LLMModels.Provider`, `LLMModels.Model` with Zoi validation schemas in `lib/llm_models/schema/`
 - **Storage**: O(1) lock-free queries via `:persistent_term`, snapshot in `priv/llm_models/snapshot.json`
 - **ETL Pipeline**: Ingest → Normalize → Validate → Merge → Enrich → Filter → Index + Publish (7 stages)
+- **Startup**: Catalog automatically loads on application start via `LLMModels.Application` (no manual `load()` needed in IEx or runtime)
 
 ## Code Style
 

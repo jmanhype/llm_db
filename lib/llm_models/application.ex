@@ -11,6 +11,9 @@ defmodule LLMModels.Application do
 
   @impl true
   def start(_type, _args) do
-    LLMModels.load()
+    case LLMModels.load() do
+      {:ok, _snapshot} -> {:ok, self()}
+      {:error, reason} -> {:error, reason}
+    end
   end
 end
