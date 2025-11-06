@@ -41,7 +41,10 @@ jobs:
             ${{ runner.os }}-mix-1.16-26-
 
       - name: Install dependencies
-        run: mix deps.get
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          mix deps.get
 
       - name: Pull latest metadata from sources
         id: pull
@@ -97,10 +100,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TITLE="Update model metadata - $(date +%Y-%m-%d)"
           gh pr create \
             --base main \
             --head "${{ steps.commit.outputs.branch_name }}" \
-            --title "Update model metadata #${{ github.run_number }}" \
+            --title "$TITLE" \
             --body-file "/tmp/metadata_summary.md" \
             --label "metadata-update" \
             --label "automated"
@@ -108,5 +112,5 @@ jobs:
       - name: Report no changes
         if: steps.changes.outputs.has_changes == 'false'
         run: |
-          echo "✅ No metadata changes detected. Skipping PR creation."
+          echo "No metadata changes detected. Skipping PR creation."
           echo "All model metadata is up to date."
