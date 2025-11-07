@@ -39,7 +39,7 @@ defmodule LLMDb.Engine do
   alias LLMDb.{Config, Enrich, Merge, Normalize, Source, Validate}
 
   # List fields that should be unioned when merging models from multiple sources
-  @list_union_keys MapSet.new([:aliases, :tags, :input, :output])
+  @list_union_keys [:aliases, :tags, :input, :output]
 
   @doc """
   Runs the complete ETL pipeline to generate a model catalog snapshot.
@@ -332,7 +332,7 @@ defmodule LLMDb.Engine do
   defp model_merge_resolver(key, left_val, right_val)
        when is_list(left_val) and is_list(right_val) do
     # For lists: union if accumulative field, replace otherwise
-    if MapSet.member?(@list_union_keys, key) do
+    if key in @list_union_keys do
       union_unique(left_val, right_val)
     else
       right_val
