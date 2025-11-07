@@ -50,6 +50,18 @@ defmodule LLMDb.Config do
 
   Reads `:llm_db` application config and normalizes with defaults.
 
+  ## Configuration Format
+
+  Use the `:filter` key (singular) with `:allow` and `:deny` nested maps:
+
+      config :llm_db,
+        filter: %{
+          allow: %{anthropic: ["claude-3-haiku-*"]},
+          deny: %{}
+        }
+
+  Provider keys can be atoms or strings. Patterns support glob syntax with `*` wildcards.
+
   ## Returns
 
   A map with keys:
@@ -62,10 +74,15 @@ defmodule LLMDb.Config do
   def get do
     config = Application.get_all_env(:llm_db)
 
+    # Read filter config (singular key)
+    filter = Keyword.get(config, :filter, %{}) || %{}
+    allow = Map.get(filter, :allow, :all)
+    deny = Map.get(filter, :deny, %{})
+
     %{
       compile_embed: Keyword.get(config, :compile_embed, false),
-      allow: Keyword.get(config, :allow, :all),
-      deny: Keyword.get(config, :deny, %{}),
+      allow: allow,
+      deny: deny,
       prefer: Keyword.get(config, :prefer, [])
     }
   end
@@ -77,70 +94,107 @@ defmodule LLMDb.Config do
 
   - `allow` - `:all` or `%{provider_atom => [pattern_strings]}`
   - `deny` - `%{provider_atom => [pattern_strings]}`
+  - `known_providers` - Optional list of known provider atoms for validation (defaults to all existing atoms)
 
   Patterns support glob syntax with `*` wildcards via `LLMDb.Merge.compile_pattern/1`.
+
+  Provider keys that don't correspond to existing atoms are silently ignored.
 
   Deny patterns always win over allow patterns.
 
   ## Returns
 
-  `%{allow: compiled_patterns, deny: compiled_patterns}`
+  `{%{allow: compiled_patterns, deny: compiled_patterns}, unknown_providers}`
 
-  Where `compiled_patterns` is either `:all` or `%{provider => [%Regex{}]}`.
+  Where `compiled_patterns` is either `:all` or `%{provider => [%Regex{}]}`,
+  and `unknown_providers` is a list of provider keys that were ignored.
   """
-  @spec compile_filters(allow :: :all | map(), deny :: map()) :: %{
-          allow: :all | map(),
-          deny: map()
-        }
-  def compile_filters(allow, deny) do
-    %{
-      allow: compile_patterns(allow),
-      deny: compile_patterns(deny)
+  @spec compile_filters(allow :: :all | map(), deny :: map(), known_providers :: [atom()] | nil) ::
+          {%{allow: :all | map(), deny: map()}, unknown: [term()]}
+  def compile_filters(allow, deny, known_providers \\ nil) do
+    {compiled_allow, unknown_allow} = compile_patterns(allow, known_providers)
+    {compiled_deny, unknown_deny} = compile_patterns(deny, known_providers)
+
+    unknown = Enum.uniq(unknown_allow ++ unknown_deny)
+
+    {
+      %{
+        allow: compiled_allow,
+        deny: compiled_deny
+      },
+      [unknown: unknown]
     }
   end
 
   # Private helpers
 
-  defp compile_patterns(:all), do: :all
+  defp compile_patterns(:all, _known_providers), do: {:all, []}
 
-  defp compile_patterns(patterns) when is_list(patterns) do
-    # List format: ["provider:model_id", "provider:model-*"]
-    # Parse spec strings and group by provider
-    patterns
-    |> Enum.reduce(%{}, fn spec, acc ->
-      case parse_spec(spec) do
-        {:ok, provider, model_pattern} ->
-          Map.update(acc, provider, [model_pattern], fn existing ->
-            [model_pattern | existing]
-          end)
+  defp compile_patterns(patterns, known_providers) when is_map(patterns) do
+    {compiled, unknown} =
+      Enum.reduce(patterns, {%{}, []}, fn {provider, patterns_list},
+                                          {acc_compiled, acc_unknown} ->
+        case resolve_provider_key(provider, known_providers) do
+          {:ok, provider_atom} ->
+            # Ensure patterns_list is a list
+            list = List.wrap(patterns_list)
 
-        :error ->
-          acc
-      end
-    end)
-    |> Map.new(fn {provider, pattern_list} ->
-      compiled = Enum.map(pattern_list, &LLMDb.Merge.compile_pattern/1)
-      {provider, compiled}
-    end)
+            # Compile each pattern (string glob or Regex)
+            compiled =
+              Enum.map(list, fn
+                %Regex{} = r ->
+                  r
+
+                s when is_binary(s) ->
+                  LLMDb.Merge.compile_pattern(s)
+
+                other ->
+                  raise ArgumentError,
+                        "llm_db: filter pattern must be string or Regex, got: #{inspect(other)} for provider #{inspect(provider_atom)}"
+              end)
+
+            {Map.put(acc_compiled, provider_atom, compiled), acc_unknown}
+
+          {:error, _reason} ->
+            # Unknown provider - add to unknown list, don't compile
+            {acc_compiled, [provider | acc_unknown]}
+        end
+      end)
+
+    {compiled, Enum.reverse(unknown)}
   end
 
-  defp compile_patterns(patterns) when is_map(patterns) do
-    Map.new(patterns, fn {provider, pattern_list} ->
-      compiled = Enum.map(pattern_list, &LLMDb.Merge.compile_pattern/1)
-      {provider, compiled}
-    end)
-  end
+  defp compile_patterns(_, _known_providers), do: {%{}, []}
 
-  defp compile_patterns(_), do: %{}
-
-  # Parse spec string "provider:model_id" into {provider_atom, model_id}
-  defp parse_spec(spec) when is_binary(spec) do
-    case String.split(spec, ":", parts: 2) do
-      [provider_str, model_id] when provider_str != "" and model_id != "" ->
-        {:ok, String.to_atom(provider_str), model_id}
-
-      _ ->
-        :error
+  defp resolve_provider_key(provider, known_providers) when is_atom(provider) do
+    # If known_providers specified, validate; otherwise trust the atom
+    if known_providers == nil or provider in known_providers do
+      {:ok, provider}
+    else
+      {:error, :unknown}
     end
+  end
+
+  defp resolve_provider_key(provider, known_providers) when is_binary(provider) do
+    # Try to convert string to existing atom only
+    try do
+      provider_atom = String.to_existing_atom(provider)
+
+      # If known_providers specified, validate
+      if known_providers == nil or provider_atom in known_providers do
+        {:ok, provider_atom}
+      else
+        {:error, :unknown}
+      end
+    rescue
+      ArgumentError ->
+        # String doesn't correspond to an existing atom
+        {:error, :not_existing_atom}
+    end
+  end
+
+  defp resolve_provider_key(provider, _known_providers) do
+    raise ArgumentError,
+          "llm_db: filter provider keys must be atoms or strings, got: #{inspect(provider)}"
   end
 end

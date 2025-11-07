@@ -113,16 +113,49 @@ The packaged snapshot loads automatically at app start. Optional runtime filters
 ```elixir
 # config/runtime.exs
 config :llm_db,
-  prefer: [:openai, :anthropic],     # provider preference order
-  allow: %{openai: :all},            # allow by provider or wildcard list
-  deny:  %{openai: ["*-preview"]}    # deny patterns override allow
+  filter: %{
+    allow: :all,                     # :all or %{provider => [patterns]}
+    deny: %{openai: ["*-preview"]}   # deny patterns override allow
+  },
+  prefer: [:openai, :anthropic]      # provider preference order
 ```
 
-Reload during development:
+### Filter Examples
 
 ```elixir
-:ok = LLMDb.reload()
+# Allow all, deny preview/beta models
+config :llm_db,
+  filter: %{
+    allow: :all,
+    deny: %{openai: ["*-preview", "*-beta"]}
+  }
+
+# Allow only specific model families
+config :llm_db,
+  filter: %{
+    allow: %{
+      anthropic: ["claude-3-haiku-*", "claude-3.5-sonnet-*"],
+      openrouter: ["anthropic/claude-*"]
+    },
+    deny: %{}
+  }
+
+# Runtime override (widen/narrow filters without rebuild)
+{:ok, _snapshot} = LLMDb.load(
+  runtime_overrides: %{
+    filter: %{allow: %{openai: ["gpt-4o-*"]}, deny: %{}}
+  }
+)
 ```
+
+**Filter Rules:**
+- Provider keys: atoms or strings; patterns: `"*"` (glob) and `~r//` (Regex)
+- Deny wins over allow
+- Unknown providers are warned and ignored
+- Empty allow map `%{}` behaves like `:all`
+- `allow: %{provider: []}` blocks provider entirely
+
+See [Runtime Filters guide](guides/runtime-filters.md) for details and troubleshooting.
 
 ## Updating Model Data
 
@@ -145,6 +178,7 @@ Designed to power [ReqLLM](https://github.com/agentjido/req_llm), but fully stan
 ## Docs & Guides
 
 - [Using the Data](guides/using-the-data.md) — Runtime API and querying
+- [Runtime Filters](guides/runtime-filters.md) — Load-time and runtime filtering
 - [Sources & Engine](guides/sources-and-engine.md) — ETL pipeline, data sources, precedence
 - [Schema System](guides/schema-system.md) — Zoi validation and data structures
 - [Release Process](guides/release-process.md) — Snapshot-based releases

@@ -1,7 +1,7 @@
 defmodule LLMDb.EngineOverrideTest do
   use ExUnit.Case, async: false
 
-  alias LLMDb.{Engine, Store}
+  alias LLMDb.{Config, Engine, Index, Store}
 
   setup do
     Store.clear!()
@@ -9,6 +9,57 @@ defmodule LLMDb.EngineOverrideTest do
     Application.delete_env(:llm_db, :deny)
     Application.delete_env(:llm_db, :prefer)
     :ok
+  end
+
+  # Helper to run Engine and build indexes for Store
+  defp run_and_store(sources, opts \\ []) do
+    config = Config.get()
+    {:ok, snapshot} = Engine.run([sources: sources] ++ opts)
+
+    # Extract providers and models from v2 nested structure
+    providers = Map.values(snapshot.providers)
+
+    all_models =
+      providers
+      |> Enum.flat_map(fn p -> Map.values(p.models) end)
+
+    # Build indexes at load time using filters from opts or config
+    provider_ids = Enum.map(providers, & &1.id)
+
+    {filters, _unknown_info} =
+      case Keyword.get(opts, :filters) do
+        nil ->
+          Config.compile_filters(config.allow, config.deny, provider_ids)
+
+        filter_opts ->
+          Config.compile_filters(
+            Map.get(filter_opts, :allow, config.allow),
+            Map.get(filter_opts, :deny, config.deny),
+            provider_ids
+          )
+      end
+
+    filtered_models = Engine.apply_filters(all_models, filters)
+    indexes = Index.build(providers, filtered_models)
+
+    # Build runtime snapshot with indexes
+    runtime_snapshot = %{
+      providers_by_id: indexes.providers_by_id,
+      models_by_key: indexes.models_by_key,
+      aliases_by_key: indexes.aliases_by_key,
+      providers: providers,
+      models: indexes.models_by_provider,
+      base_models: all_models,
+      filters: filters,
+      prefer: config.prefer,
+      meta: %{
+        epoch: nil,
+        generated_at: snapshot.generated_at
+      }
+    }
+
+    Store.put!(runtime_snapshot, [])
+    {:ok, runtime_snapshot}
   end
 
   describe "provider metadata override" do
@@ -45,8 +96,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:openai)
       assert provider.name == "OpenAI Custom"
@@ -85,8 +135,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:anthropic)
       # Expected for req_llm: arrays should be replaced
@@ -119,8 +168,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:custom_provider)
       assert provider.name == "Custom Provider"
@@ -154,8 +202,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       assert {:ok, _} = LLMDb.model(:openai, "gpt-4")
       assert {:ok, _} = LLMDb.model(:openai, "gpt-4-custom")
@@ -197,8 +244,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:openai, "gpt-4")
       assert model.capabilities.reasoning.enabled == true
@@ -241,8 +287,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:openai, "gpt-4")
       assert model.cost.input == 25.0
@@ -284,8 +329,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:anthropic, "claude-3-opus")
       assert model.limits.context == 180_000
@@ -327,8 +371,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:openai, "gpt-4")
       assert model.modalities.input == [:text]
@@ -359,8 +402,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:openai)
       assert provider.doc == "Custom documentation"
@@ -395,8 +437,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:openai, "gpt-4")
       assert model.extra.supports_strict_tools == true
@@ -445,8 +486,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: override}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:openai)
       assert provider.extra.custom_base == "base value"
@@ -480,10 +520,9 @@ defmodule LLMDb.EngineOverrideTest do
       }
 
       sources = [{LLMDb.Sources.Config, %{overrides: base}}]
-      filters = %{deny: ["openai:gpt-3.5-turbo", "openai:gpt-4-vision"]}
+      filters = %{deny: %{openai: ["gpt-3.5-turbo", "gpt-4-vision"]}}
 
-      assert {:ok, snapshot} = Engine.run(sources: sources, filters: filters)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources, filters: filters)
 
       assert {:ok, _} = LLMDb.model(:openai, "gpt-4")
       assert {:error, :not_found} = LLMDb.model(:openai, "gpt-3.5-turbo")
@@ -524,15 +563,16 @@ defmodule LLMDb.EngineOverrideTest do
       sources = [{LLMDb.Sources.Config, %{overrides: base}}]
 
       filters = %{
-        deny: [
-          "custom:model:with:colons",
-          "custom:model/with/slashes",
-          "custom:model@version"
-        ]
+        deny: %{
+          custom: [
+            "model:with:colons",
+            "model/with/slashes",
+            "model@version"
+          ]
+        }
       }
 
-      assert {:ok, snapshot} = Engine.run(sources: sources, filters: filters)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources, filters: filters)
 
       assert {:error, :not_found} = LLMDb.model(:custom, "model:with:colons")
       assert {:error, :not_found} = LLMDb.model(:custom, "model/with/slashes")
@@ -556,10 +596,9 @@ defmodule LLMDb.EngineOverrideTest do
       }
 
       sources = [{LLMDb.Sources.Config, %{overrides: base}}]
-      filters = %{deny: ["openai:gpt-*"]}
+      filters = %{deny: %{openai: ["gpt-*"]}}
 
-      assert {:ok, snapshot} = Engine.run(sources: sources, filters: filters)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources, filters: filters)
 
       assert {:error, :not_found} = LLMDb.model(:openai, "gpt-4")
       assert {:error, :not_found} = LLMDb.model(:openai, "gpt-3.5-turbo")
@@ -628,8 +667,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: source3}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:openai)
       assert provider.name == "OpenAI Source 3"
@@ -685,8 +723,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: source2}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, provider} = LLMDb.provider(:openai)
       assert provider.env == ["KEY3"]
@@ -741,8 +778,7 @@ defmodule LLMDb.EngineOverrideTest do
         {LLMDb.Sources.Config, %{overrides: source2}}
       ]
 
-      assert {:ok, snapshot} = Engine.run(sources: sources)
-      Store.put!(snapshot, [])
+      assert {:ok, _snapshot} = run_and_store(sources)
 
       {:ok, model} = LLMDb.model(:openai, "gpt-4")
       assert model.cost.input == 25.0

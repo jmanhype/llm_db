@@ -3,11 +3,11 @@ defmodule LLMDb.Engine do
   Pure ETL pipeline for BUILD-TIME LLM model catalog generation.
 
   Engine is a pure function: sources in, snapshot out. It processes ONLY
-  the sources explicitly passed via options or configured sources - no
-  packaged base layer, no runtime overrides.
+  the sources explicitly passed via options or configured sources.
 
   This module is designed for BUILD-TIME use (e.g., mix tasks) to generate
-  snapshots from remote/local sources that will be packaged into the library.
+  complete, unfiltered snapshots from remote/local sources that will be
+  packaged into the library.
 
   ## Pipeline Stages
 
@@ -15,7 +15,7 @@ defmodule LLMDb.Engine do
   2. **Normalize** - Apply normalization to providers and models per layer
   3. **Validate** - Validate schemas and log dropped records per layer
   4. **Merge** - Combine layers with precedence rules (last wins)
-  5. **Finalize** - Filter, enrich, and index the final catalog
+  5. **Finalize** - Enrich and nest models under providers
   6. **Ensure viable** - Verify catalog has content (warns if empty)
 
   ## Architecture
@@ -27,7 +27,11 @@ defmodule LLMDb.Engine do
   4. Last source (highest precedence)
 
   The engine coordinates data ingestion, normalization, validation, merging,
-  and finalization to produce a comprehensive model snapshot.
+  and finalization to produce a complete v2 snapshot ready for JSON serialization.
+
+  **Filtering and indexing are deferred to load-time** - the snapshot contains
+  ALL data from sources. Runtime policies (allow/deny patterns, preferences)
+  are applied when the snapshot is loaded via `LLMDb.load/1`.
   """
 
   require Logger
@@ -37,18 +41,19 @@ defmodule LLMDb.Engine do
   @doc """
   Runs the complete ETL pipeline to generate a model catalog snapshot.
 
-  Pure function that processes sources into a snapshot. BUILD-TIME only.
+  Pure function that processes sources into a complete, unfiltered snapshot.
+  BUILD-TIME only.
 
   ## Options
 
   - `:sources` - List of `{module, opts}` source tuples (optional, defaults to Config.sources!())
-  - `:allow` - Allow patterns (optional, defaults to Config allow)
-  - `:deny` - Deny patterns (optional, defaults to Config deny)
-  - `:prefer` - List of preferred provider atoms (optional, defaults to Config prefer)
+
+  Note: `:allow`, `:deny`, `:prefer`, and `:filters` options are ignored.
+  Filtering is a load-time concern applied via `LLMDb.load/1` and runtime config.
 
   ## Returns
 
-  - `{:ok, snapshot_map}` - Success with indexed snapshot
+  - `{:ok, snapshot_map}` - Success with v2 snapshot structure
   - `{:ok, snapshot_map}` - Empty catalog (warns but succeeds if no sources)
   - `{:error, term}` - Other error
 
@@ -56,18 +61,14 @@ defmodule LLMDb.Engine do
 
   ```elixir
   %{
-    # Internal indexes (not serialized to JSON)
-    providers_by_id: %{atom => Provider.t()},
-    models_by_key: %{{atom, String.t()} => Model.t()},
-    aliases_by_key: %{{atom, String.t()} => String.t()},
-    filters: %{allow: compiled, deny: compiled},
-    prefer: [atom],
-    # V2 output structure (serialized to JSON)
     version: 2,
     generated_at: String.t(),
-    providers: %{atom => %{provider_fields + models: %{String.t() => Model.t()}}}
+    providers: %{atom => %{provider_fields... + models: %{String.t() => Model.t()}}}
   }
   ```
+
+  The snapshot contains ALL models from all sources. Indexes and filters are
+  built at load-time by `LLMDb.load/1` using the `LLMDb.Index` module.
   """
   @spec run(keyword()) :: {:ok, map()} | {:error, term()}
   def run(opts \\ []) do
@@ -83,8 +84,6 @@ defmodule LLMDb.Engine do
 
   # Stage 1: Ingest - load data from configured sources only
   defp ingest(opts) do
-    config = Config.get()
-
     # Get sources list (from opts or config)
     sources_list =
       case Keyword.get(opts, :sources) do
@@ -124,36 +123,7 @@ defmodule LLMDb.Engine do
         end
       end)
 
-    # Get filters and prefer from opts or config
-    # Support both separate :allow/:deny options and combined :filters option
-    {allow, deny} =
-      case Keyword.get(opts, :filters) do
-        %{allow: allow_val, deny: deny_val} ->
-          {allow_val, deny_val}
-
-        %{deny: deny_val} ->
-          {:all, deny_val}
-
-        %{allow: allow_val} ->
-          {allow_val, %{}}
-
-        nil ->
-          {Keyword.get(opts, :allow, config.allow), Keyword.get(opts, :deny, config.deny)}
-
-        _ ->
-          {config.allow, config.deny}
-      end
-
-    layers_data = %{
-      layers: source_layers,
-      filters: %{
-        allow: allow,
-        deny: deny
-      },
-      prefer: Keyword.get(opts, :prefer, config.prefer)
-    }
-
-    {:ok, layers_data}
+    {:ok, %{layers: source_layers}}
   end
 
   # Stage 2: Normalize - apply to each layer
@@ -167,12 +137,7 @@ defmodule LLMDb.Engine do
         }
       end)
 
-    {:ok,
-     %{
-       layers: normalized_layers,
-       filters: layers_data.filters,
-       prefer: layers_data.prefer
-     }}
+    {:ok, %{layers: normalized_layers}}
   end
 
   # Stage 3: Validate - apply to each layer and log results
@@ -199,12 +164,7 @@ defmodule LLMDb.Engine do
         }
       end)
 
-    {:ok,
-     %{
-       layers: validated_layers,
-       filters: normalized.filters,
-       prefer: normalized.prefer
-     }}
+    {:ok, %{layers: validated_layers}}
   end
 
   # Stage 4: Merge - combine all layers with precedence (last wins)
@@ -218,40 +178,15 @@ defmodule LLMDb.Engine do
         }
       end)
 
-    merged = %{
-      providers: providers,
-      models: models,
-      filters: validated.filters,
-      prefer: validated.prefer
-    }
-
-    {:ok, merged}
+    {:ok, %{providers: providers, models: models}}
   end
 
-  # Stage 5: Finalize (Filter → Enrich → Index)
+  # Stage 5: Finalize (Enrich → Nest)
   defp finalize(merged) do
-    # Step 1: Filter - compile and apply allow/deny patterns
-    compiled_filters = Config.compile_filters(merged.filters.allow, merged.filters.deny)
-    filtered_models = apply_filters(merged.models, compiled_filters)
+    models = Enrich.enrich_models(merged.models)
+    nested_providers = build_nested_providers(merged.providers, models)
 
-    # Step 2: Enrich - derive family, ensure provider_model_id, apply defaults
-    enriched_models = Enrich.enrich_models(filtered_models)
-
-    # Step 3: Index - build lookup indexes for O(1) access (still needed internally)
-    indexes = build_indexes(merged.providers, enriched_models)
-
-    # Step 4: Build nested v2 structure for snapshot
-    nested_providers = build_nested_providers(merged.providers, indexes.models_by_provider)
-
-    # Step 5: Build snapshot structure (v2 schema)
     snapshot = %{
-      # Internal indexes for runtime use (not serialized)
-      providers_by_id: indexes.providers_by_id,
-      models_by_key: indexes.models_by_key,
-      aliases_by_key: indexes.aliases_by_key,
-      filters: compiled_filters,
-      prefer: merged.prefer,
-      # V2 output structure (for JSON serialization)
       version: 2,
       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       providers: nested_providers
@@ -275,37 +210,6 @@ defmodule LLMDb.Engine do
     end
 
     :ok
-  end
-
-  @doc """
-  Builds lookup indexes for providers, models, and aliases.
-
-  ## Returns
-
-  A map with:
-  - `:providers_by_id` - %{atom => Provider.t()}
-  - `:models_by_key` - %{{atom, String.t()} => Model.t()}
-  - `:models_by_provider` - %{atom => [Model.t()]}
-  - `:aliases_by_key` - %{{atom, String.t()} => String.t()}
-  """
-  @spec build_indexes([map()], [map()]) :: map()
-  def build_indexes(providers, models) do
-    providers_by_id = Map.new(providers, fn p -> {p.id, p} end)
-
-    models_by_key = Map.new(models, fn m -> {{m.provider, m.id}, m} end)
-
-    models_by_provider =
-      Enum.group_by(models, & &1.provider)
-      |> Map.new(fn {provider, models_list} -> {provider, models_list} end)
-
-    aliases_by_key = build_aliases_index(models)
-
-    %{
-      providers_by_id: providers_by_id,
-      models_by_key: models_by_key,
-      models_by_provider: models_by_provider,
-      aliases_by_key: aliases_by_key
-    }
   end
 
   @doc """
@@ -354,32 +258,6 @@ defmodule LLMDb.Engine do
   end
 
   @doc """
-  Builds an alias index mapping {provider, alias} to canonical model ID.
-
-  ## Parameters
-
-  - `models` - List of model maps
-
-  ## Returns
-
-  %{{provider_atom, alias_string} => canonical_id_string}
-  """
-  @spec build_aliases_index([map()]) :: %{{atom(), String.t()} => String.t()}
-  def build_aliases_index(models) do
-    models
-    |> Enum.flat_map(fn model ->
-      provider = model.provider
-      canonical_id = model.id
-      aliases = Map.get(model, :aliases, [])
-
-      Enum.map(aliases, fn alias_name ->
-        {{provider, alias_name}, canonical_id}
-      end)
-    end)
-    |> Map.new()
-  end
-
-  @doc """
   Builds the nested v2 provider structure for snapshot serialization.
 
   Groups models by provider and nests them under their provider.
@@ -388,37 +266,30 @@ defmodule LLMDb.Engine do
   ## Parameters
 
   - `providers` - List of provider maps
-  - `models_by_provider` - %{atom => [Model.t()]}
+  - `models` - List of model maps
 
   ## Returns
 
   %{atom => %{provider fields + models: %{string => model}}}
   """
-  @spec build_nested_providers([map()], %{atom() => [map()]}) :: %{atom() => map()}
-  def build_nested_providers(providers, models_by_provider) do
+  @spec build_nested_providers([map()], [map()]) :: %{atom() => map()}
+  def build_nested_providers(providers, models) do
+    models_by_provider = Enum.group_by(models, & &1.provider)
+
     providers
     |> Enum.map(fn provider ->
       provider_id = provider.id
       provider_models = Map.get(models_by_provider, provider_id, [])
 
-      # Build models map keyed by model ID
       models_map =
         provider_models
-        |> Enum.map(fn model ->
-          # Keep provider field for convenience (though redundant in nested structure)
-          {model.id, model}
-        end)
-        |> Enum.sort_by(fn {id, _model} -> id end)
+        |> Enum.map(&{&1.id, &1})
+        |> Enum.sort_by(fn {id, _} -> id end)
         |> Map.new()
 
-      # Merge provider data with nested models
-      nested_provider =
-        provider
-        |> Map.put(:models, models_map)
-
-      {provider_id, nested_provider}
+      {provider_id, Map.put(provider, :models, models_map)}
     end)
-    |> Enum.sort_by(fn {id, _provider} -> to_string(id) end)
+    |> Enum.sort_by(fn {id, _} -> to_string(id) end)
     |> Map.new()
   end
 

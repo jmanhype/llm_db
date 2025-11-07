@@ -50,17 +50,18 @@ defmodule LLMDb.EngineTest do
       {:ok, snapshot} = Engine.run(sources: sources)
 
       assert is_map(snapshot)
-      # v2 schema: internal indexes
-      assert Map.has_key?(snapshot, :providers_by_id)
-      assert Map.has_key?(snapshot, :models_by_key)
-      assert Map.has_key?(snapshot, :aliases_by_key)
-      assert Map.has_key?(snapshot, :filters)
-      assert Map.has_key?(snapshot, :prefer)
-      # v2 schema: serializable fields
+      # v2 schema: minimal structure (no indexes at build time)
       assert Map.has_key?(snapshot, :version)
       assert Map.has_key?(snapshot, :generated_at)
       assert Map.has_key?(snapshot, :providers)
       assert snapshot.version == 2
+
+      # Should NOT have indexes (built at load time)
+      refute Map.has_key?(snapshot, :providers_by_id)
+      refute Map.has_key?(snapshot, :models_by_key)
+      refute Map.has_key?(snapshot, :aliases_by_key)
+      refute Map.has_key?(snapshot, :filters)
+      refute Map.has_key?(snapshot, :prefer)
     end
 
     test "snapshot has correct metadata structure" do
@@ -71,29 +72,19 @@ defmodule LLMDb.EngineTest do
       assert is_binary(snapshot.generated_at)
     end
 
-    test "builds provider index correctly" do
+    test "builds nested provider structure correctly" do
       {:ok, snapshot} = Engine.run(runtime_overrides: minimal_test_data(), sources: [])
 
-      if map_size(snapshot.providers_by_id) > 0 do
-        {provider_id, provider} = Enum.at(snapshot.providers_by_id, 0)
+      if map_size(snapshot.providers) > 0 do
+        {provider_id, provider} = Enum.at(snapshot.providers, 0)
         assert is_atom(provider_id)
         assert provider.id == provider_id
+        assert Map.has_key?(provider, :models)
+        assert is_map(provider.models)
       end
     end
 
-    test "builds model key index correctly" do
-      {:ok, snapshot} = Engine.run(runtime_overrides: minimal_test_data(), sources: [])
-
-      if map_size(snapshot.models_by_key) > 0 do
-        {{provider, model_id}, model} = Enum.at(snapshot.models_by_key, 0)
-        assert is_atom(provider)
-        assert is_binary(model_id)
-        assert model.provider == provider
-        assert model.id == model_id
-      end
-    end
-
-    test "builds models by provider index correctly" do
+    test "nests models under providers" do
       {:ok, snapshot} = Engine.run(runtime_overrides: minimal_test_data(), sources: [])
 
       # v2 schema: models are nested under providers[provider_id].models
@@ -106,19 +97,6 @@ defmodule LLMDb.EngineTest do
           models_list = Map.values(provider_data.models)
           assert Enum.all?(models_list, fn m -> m.provider == provider_id end)
         end
-      end
-    end
-
-    test "builds aliases index correctly" do
-      {:ok, snapshot} = Engine.run(runtime_overrides: minimal_test_data(), sources: [])
-
-      if map_size(snapshot.aliases_by_key) > 0 do
-        {{provider, alias_name}, canonical_id} = Enum.at(snapshot.aliases_by_key, 0)
-        assert is_atom(provider)
-        assert is_binary(alias_name)
-        assert is_binary(canonical_id)
-
-        assert Map.has_key?(snapshot.models_by_key, {provider, canonical_id})
       end
     end
 
@@ -137,47 +115,8 @@ defmodule LLMDb.EngineTest do
 
       {:ok, snapshot} = run_with_test_data(config)
 
-      assert Map.has_key?(snapshot.providers_by_id, :test_provider)
-      assert Map.has_key?(snapshot.models_by_key, {:test_provider, "test-model"})
-    end
-  end
-
-  describe "build_indexes/2" do
-    test "builds all indexes from providers and models" do
-      providers = [
-        %{id: :provider_a, name: "Provider A"},
-        %{id: :provider_b, name: "Provider B"}
-      ]
-
-      models = [
-        %{id: "model-a1", provider: :provider_a, aliases: ["alias-a1"]},
-        %{id: "model-a2", provider: :provider_a, aliases: []},
-        %{id: "model-b1", provider: :provider_b, aliases: ["alias-b1", "alias-b2"]}
-      ]
-
-      indexes = Engine.build_indexes(providers, models)
-
-      assert map_size(indexes.providers_by_id) == 2
-      assert indexes.providers_by_id[:provider_a].name == "Provider A"
-
-      assert map_size(indexes.models_by_key) == 3
-      assert indexes.models_by_key[{:provider_a, "model-a1"}].id == "model-a1"
-
-      assert map_size(indexes.models_by_provider) == 2
-      assert length(indexes.models_by_provider[:provider_a]) == 2
-
-      assert map_size(indexes.aliases_by_key) == 3
-      assert indexes.aliases_by_key[{:provider_a, "alias-a1"}] == "model-a1"
-      assert indexes.aliases_by_key[{:provider_b, "alias-b1"}] == "model-b1"
-    end
-
-    test "handles empty providers and models" do
-      indexes = Engine.build_indexes([], [])
-
-      assert map_size(indexes.providers_by_id) == 0
-      assert map_size(indexes.models_by_key) == 0
-      assert map_size(indexes.models_by_provider) == 0
-      assert map_size(indexes.aliases_by_key) == 0
+      assert Map.has_key?(snapshot.providers, :test_provider)
+      assert Map.has_key?(snapshot.providers[:test_provider].models, "test-model")
     end
   end
 
@@ -227,7 +166,7 @@ defmodule LLMDb.EngineTest do
         %{id: "model-a2", provider: :provider_a}
       ]
 
-      filters =
+      {filters, _unknown_info} =
         LLMDb.Config.compile_filters(
           %{provider_a: ["*"]},
           %{provider_a: ["model-a2"]}
@@ -250,38 +189,6 @@ defmodule LLMDb.EngineTest do
       filtered = Engine.apply_filters(models, filters)
       assert length(filtered) == 1
       assert hd(filtered).id == "gpt-4"
-    end
-  end
-
-  describe "build_aliases_index/1" do
-    test "builds alias mappings" do
-      models = [
-        %{id: "model-a", provider: :provider_a, aliases: ["alias-1", "alias-2"]},
-        %{id: "model-b", provider: :provider_b, aliases: ["alias-3"]}
-      ]
-
-      index = Engine.build_aliases_index(models)
-
-      assert map_size(index) == 3
-      assert index[{:provider_a, "alias-1"}] == "model-a"
-      assert index[{:provider_a, "alias-2"}] == "model-a"
-      assert index[{:provider_b, "alias-3"}] == "model-b"
-    end
-
-    test "handles models without aliases" do
-      models = [
-        %{id: "model-a", provider: :provider_a, aliases: []},
-        %{id: "model-b", provider: :provider_b}
-      ]
-
-      index = Engine.build_aliases_index(models)
-
-      assert map_size(index) == 0
-    end
-
-    test "handles empty model list" do
-      index = Engine.build_aliases_index([])
-      assert map_size(index) == 0
     end
   end
 end

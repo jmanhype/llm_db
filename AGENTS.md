@@ -12,6 +12,20 @@
 - **Dependencies**: `mix deps.get`
 - **Release**: `mix llm_db.version && mix git_ops.release && git push && git push --tags` (bumps to date-based version, updates CHANGELOG, tags, and pushes)
 
+## Production Configuration
+
+For production deployments, use compile-time embedded snapshot to eliminate runtime atom creation and file I/O:
+
+```elixir
+# config/prod.exs
+config :llm_db,
+  compile_embed: true,
+  filter: %{
+    allow: :all,  # or restrict to specific providers
+    deny: %{}
+  }
+```
+
 ## Architecture
 
 - **Type**: Elixir library providing fast, persistent_term-backed LLM model metadata catalog
@@ -29,3 +43,4 @@
 - **Error handling**: Return `{:ok, result}` or `{:error, reason}` tuples, use `:error` atom for simple failures
 - **Specs**: Provider IDs are atoms, model IDs are strings, spec format is `"provider:model"`
 - **Tests**: Use `async: false` for tests that modify Store, `setup` blocks to clear state with `Store.clear!()`
+- **Atom safety**: Use `String.to_existing_atom/1` for runtime conversions; `String.to_atom/1` only in build-time code (mix tasks, Engine normalization with `unsafe: true` flag)

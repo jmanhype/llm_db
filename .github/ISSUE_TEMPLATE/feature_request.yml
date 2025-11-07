@@ -31,7 +31,7 @@ body:
       description: How would you like this to work?
       placeholder: |
         Add a filter option:
-        LLMModels.filter(vision: true)
+        LLMDb.filter(vision: true)
     validations:
       required: false
 

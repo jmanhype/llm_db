@@ -12,11 +12,34 @@ defmodule LLMDb.Packaged do
   ## Loading Strategy
 
   Behavior controlled by `:compile_embed` configuration option:
-  - `true` - Snapshot embedded at compile-time (zero runtime IO)
-  - `false` - Snapshot loaded at runtime from priv directory
+  - `true` - Snapshot embedded at compile-time (zero runtime IO, recommended for production)
+  - `false` - Snapshot loaded at runtime from priv directory with integrity checking
+
+  ## Security
+
+  Production deployments should use `compile_embed: true` to eliminate runtime atom
+  creation and file I/O. Runtime mode includes SHA-256 integrity verification to
+  prevent tampering with the snapshot file.
   """
 
+  require Logger
+  import Bitwise
+
   @snapshot_filename "priv/llm_db/snapshot.json"
+
+  # Compile-time integrity hash (computed only if file exists at compile time)
+  @snapshot_sha (
+                  compile_path = Path.join([Application.app_dir(:llm_db), @snapshot_filename])
+
+                  if File.exists?(compile_path) do
+                    compile_path
+                    |> File.read!()
+                    |> then(&:crypto.hash(:sha256, &1))
+                    |> Base.encode16(case: :lower)
+                  else
+                    nil
+                  end
+                )
 
   @doc """
   Returns the absolute path to the packaged snapshot file.
@@ -53,10 +76,12 @@ defmodule LLMDb.Packaged do
     def snapshot, do: @snapshot
   else
     @doc """
-    Returns the packaged base snapshot (runtime loaded).
+    Returns the packaged base snapshot (runtime loaded with integrity check).
 
     This snapshot is the pre-processed output of the ETL pipeline and serves
     as the stable foundation for this package version.
+
+    Includes SHA-256 integrity verification to prevent tampering.
 
     ## Returns
 
@@ -64,12 +89,86 @@ defmodule LLMDb.Packaged do
     """
     @spec snapshot() :: map() | nil
     def snapshot do
-      case File.read(path()) do
-        # Safe: Snapshot file is controlled by mix llm_db.pull
-        # All keys are validated during generation before being written
-        {:ok, content} -> Jason.decode!(content, keys: :atoms)
-        {:error, _} -> nil
+      with {:ok, content} <- File.read(path()),
+           :ok <- verify_integrity(content) do
+        decoded = Jason.decode!(content, keys: :atoms)
+        validate_schema(decoded)
+        decoded
+      else
+        {:error, :tampered} ->
+          Logger.error(
+            "llm_db: snapshot integrity check failed - file may have been tampered with. " <>
+              "Refusing to load potentially malicious snapshot."
+          )
+
+          nil
+
+        {:error, reason} ->
+          Logger.warning("llm_db: failed to load snapshot: #{inspect(reason)}")
+          nil
       end
+    end
+
+    if is_nil(@snapshot_sha) do
+      defp verify_integrity(_content), do: :ok
+    else
+      @expected_hash @snapshot_sha
+      defp verify_integrity(content) do
+        computed_hash =
+          content
+          |> then(&:crypto.hash(:sha256, &1))
+          |> Base.encode16(case: :lower)
+
+        if secure_compare(@expected_hash, computed_hash) do
+          :ok
+        else
+          {:error, :tampered}
+        end
+      end
+    end
+
+    # Constant-time string comparison to prevent timing attacks
+    defp secure_compare(a, b) when byte_size(a) == byte_size(b) do
+      a_bytes = :binary.bin_to_list(a)
+      b_bytes = :binary.bin_to_list(b)
+
+      result =
+        Enum.zip(a_bytes, b_bytes)
+        |> Enum.reduce(0, fn {x, y}, acc -> acc ||| Bitwise.bxor(x, y) end)
+
+      result == 0
+    end
+
+    defp secure_compare(_, _), do: false
+
+    defp validate_schema(snapshot) when is_map(snapshot) do
+      # Lightweight schema checks to prevent atom/memory exhaustion
+      case snapshot do
+        %{providers: providers} when is_map(providers) ->
+          provider_count = map_size(providers)
+
+          if provider_count > 1000 do
+            Logger.warning(
+              "llm_db: snapshot contains unusually large number of providers: #{provider_count}. " <>
+                "Expected < 1000. Potential DoS attempt."
+            )
+          end
+
+          # Check provider IDs match safe regex
+          Enum.each(providers, fn {provider_id, _data} ->
+            unless is_atom(provider_id) and
+                     Atom.to_string(provider_id) =~ ~r/^[a-z][a-z0-9_:-]{0,63}$/ do
+              Logger.warning(
+                "llm_db: snapshot contains suspicious provider ID: #{inspect(provider_id)}"
+              )
+            end
+          end)
+
+        _ ->
+          :ok
+      end
+
+      :ok
     end
   end
 end

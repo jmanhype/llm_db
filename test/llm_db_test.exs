@@ -18,30 +18,39 @@ defmodule LLMDbTest do
     providers = get_in(config, [:overrides, :providers]) || []
     models = get_in(config, [:overrides, :models]) || []
 
-    # Set application env for filters
-    if Map.has_key?(config, :allow), do: Application.put_env(:llm_db, :allow, config.allow)
-    if Map.has_key?(config, :deny), do: Application.put_env(:llm_db, :deny, config.deny)
+    # Set application env for filter (if provided as old format, convert)
+    if Map.has_key?(config, :allow) or Map.has_key?(config, :deny) do
+      Application.put_env(:llm_db, :filter, %{
+        allow: Map.get(config, :allow, :all),
+        deny: Map.get(config, :deny, %{})
+      })
+    end
+
     if Map.has_key?(config, :prefer), do: Application.put_env(:llm_db, :prefer, config.prefer)
 
     # Get config with test filters
     app_config = LLMDb.Config.get()
 
-    # Compile filters
-    filters = LLMDb.Config.compile_filters(app_config.allow, app_config.deny)
+    # Compile filters (returns {filters, unknown: []})
+    provider_ids = Enum.map(providers, & &1.id)
+
+    {filters, _unknown_info} =
+      LLMDb.Config.compile_filters(app_config.allow, app_config.deny, provider_ids)
 
     # Apply filters
     filtered_models = LLMDb.Engine.apply_filters(models, filters)
 
-    # Build indexes
-    indexes = LLMDb.Engine.build_indexes(providers, filtered_models)
+    # Build indexes at load time
+    indexes = LLMDb.Index.build(providers, filtered_models)
 
-    # Build snapshot
+    # Build snapshot with indexes
     snapshot = %{
       providers_by_id: indexes.providers_by_id,
       models_by_key: indexes.models_by_key,
       aliases_by_key: indexes.aliases_by_key,
       providers: providers,
       models: indexes.models_by_provider,
+      base_models: models,
       filters: filters,
       prefer: app_config.prefer,
       meta: %{
@@ -84,7 +93,8 @@ defmodule LLMDbTest do
       {:ok, _} = load_with_test_data(%{overrides: minimal_test_data()})
       epoch1 = LLMDb.epoch()
 
-      assert :ok = LLMDb.reload()
+      # reload is just calling load again
+      {:ok, _} = LLMDb.load()
       epoch2 = LLMDb.epoch()
 
       assert epoch2 > epoch1
@@ -904,7 +914,8 @@ defmodule LLMDbTest do
       assert resolved_model.provider == :provider_a
       assert resolved_model.id == "model-a1"
 
-      assert :ok = LLMDb.reload()
+      # reload is just calling load again
+      {:ok, _} = LLMDb.load()
       assert LLMDb.epoch() > 0
     end
 

@@ -104,11 +104,20 @@ defmodule LLMDb do
         # Extract provider without models key
         provider = Map.delete(provider_data, :models)
 
+        # Get provider ID as string for models
+        provider_id_str =
+          case provider_data[:id] do
+            a when is_atom(a) -> Atom.to_string(a)
+            s when is_binary(s) -> s
+          end
+
         # Extract models and ensure they have provider field
         models =
           case Map.get(provider_data, :models) do
             models when is_map(models) ->
-              Enum.map(models, fn {_model_id, model_data} -> model_data end)
+              Enum.map(models, fn {_model_id, model_data} ->
+                Map.put_new(model_data, :provider, provider_id_str)
+              end)
 
             _ ->
               []
@@ -123,39 +132,64 @@ defmodule LLMDb do
   defp build_runtime_snapshot(providers, models) do
     # Build indexes from raw providers/models data
     # This is a lightweight operation that doesn't run the full ETL pipeline
-    alias LLMDb.Config
+    alias LLMDb.{Config, Index}
+
+    require Logger
 
     config = Config.get()
 
     # Convert provider IDs from strings to atoms (JSON stores as strings)
     normalized_providers = normalize_raw_providers(providers)
-    normalized_models = normalize_raw_models(models)
+    base_models = normalize_raw_models(models)
 
-    # Compile default filters
-    filters = Config.compile_filters(config.allow, config.deny)
+    # Compile default filters with known provider validation
+    provider_ids = Enum.map(normalized_providers, & &1.id)
+
+    {filters, unknown: unknown_providers} =
+      Config.compile_filters(config.allow, config.deny, provider_ids)
+
+    # Warn on unknown providers in filters
+    if unknown_providers != [] do
+      provider_ids_set = MapSet.new(provider_ids)
+
+      Logger.warning(
+        "llm_db: unknown provider(s) in filter: #{inspect(unknown_providers)}. " <>
+          "Known providers: #{inspect(MapSet.to_list(provider_ids_set))}. " <>
+          "Check spelling or remove unknown providers from configuration."
+      )
+    end
 
     # Apply filters to models
-    filtered_models = Engine.apply_filters(normalized_models, filters)
+    filtered_models = Engine.apply_filters(base_models, filters)
 
-    # Build indexes
-    indexes = Engine.build_indexes(normalized_providers, filtered_models)
+    # Fail fast if filters eliminate all models
+    if filters.allow != :all and filtered_models == [] do
+      {:error,
+       "llm_db: filters eliminated all models. Check :llm_db filter configuration. " <>
+         "allow: #{summarize_filter(config.allow)}, deny: #{summarize_filter(config.deny)}. " <>
+         "Use allow: :all to widen filters or remove deny patterns."}
+    else
+      # Build indexes at load time
+      indexes = Index.build(normalized_providers, filtered_models)
 
-    # Build full snapshot
-    snapshot = %{
-      providers_by_id: indexes.providers_by_id,
-      models_by_key: indexes.models_by_key,
-      aliases_by_key: indexes.aliases_by_key,
-      providers: normalized_providers,
-      models: indexes.models_by_provider,
-      filters: filters,
-      prefer: config.prefer,
-      meta: %{
-        epoch: nil,
-        generated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      # Build full snapshot with indexes and base_models for runtime filter updates
+      snapshot = %{
+        providers_by_id: indexes.providers_by_id,
+        models_by_key: indexes.models_by_key,
+        aliases_by_key: indexes.aliases_by_key,
+        providers: normalized_providers,
+        models: indexes.models_by_provider,
+        base_models: base_models,
+        filters: filters,
+        prefer: config.prefer,
+        meta: %{
+          epoch: nil,
+          generated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+        }
       }
-    }
 
-    {:ok, snapshot}
+      {:ok, snapshot}
+    end
   end
 
   defp normalize_raw_providers(providers) when is_list(providers) do
@@ -211,34 +245,6 @@ defmodule LLMDb do
     case Keyword.get(opts, :runtime_overrides) do
       nil -> {:ok, snapshot}
       overrides -> Runtime.apply(snapshot, overrides)
-    end
-  end
-
-  @doc """
-  Reloads the catalog using the last-known options.
-
-  Retrieves the options from the last successful load and re-loads the snapshot
-  with those options. Does NOT re-run the full ETL pipeline or fetch from remote sources.
-
-  The catalog is automatically loaded on application start, so this is only needed
-  if you want to reload with the original startup configuration.
-
-  ## Returns
-
-  - `:ok` - Success
-  - `{:error, term}` - Error from loading or validation
-
-  ## Examples
-
-      :ok = LLMDb.reload()
-  """
-  @spec reload() :: :ok | {:error, term()}
-  def reload do
-    last_opts = Store.last_opts()
-
-    case load(last_opts) do
-      {:ok, _snapshot} -> :ok
-      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -556,8 +562,20 @@ defmodule LLMDb do
   def select(opts \\ []) do
     require_kw = Keyword.get(opts, :require, [])
     forbid_kw = Keyword.get(opts, :forbid, [])
-    prefer = Keyword.get(opts, :prefer, [])
     scope = Keyword.get(opts, :scope, :all)
+
+    # Use snapshot.prefer as default if :prefer not explicitly provided
+    prefer =
+      case Keyword.fetch(opts, :prefer) do
+        :error ->
+          case snapshot() do
+            %{prefer: p} when is_list(p) -> p
+            _ -> []
+          end
+
+        {:ok, p} ->
+          p
+      end
 
     providers =
       case scope do
@@ -684,4 +702,23 @@ defmodule LLMDb do
       [model | _] -> {:ok, {provider, model.id}}
     end
   end
+
+  defp summarize_filter(:all), do: ":all"
+
+  defp summarize_filter(filter) when is_map(filter) and map_size(filter) == 0 do
+    "%{}"
+  end
+
+  defp summarize_filter(filter) when is_map(filter) do
+    # Summarize large filter maps to avoid huge error messages
+    keys = Map.keys(filter) |> Enum.take(5)
+
+    if map_size(filter) > 5 do
+      "#{inspect(keys)} ... (#{map_size(filter)} providers total)"
+    else
+      inspect(filter)
+    end
+  end
+
+  defp summarize_filter(other), do: inspect(other)
 end

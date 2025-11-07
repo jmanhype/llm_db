@@ -3,6 +3,7 @@ defmodule LLMDb.MixProject do
 
   @version "2025.11.6"
   @source_url "https://github.com/agentjido/llm_db"
+  @description "LLM model metadata catalog with fast, capability-aware lookups."
 
   def project do
     [
@@ -12,7 +13,7 @@ defmodule LLMDb.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      description: description(),
+      description: @description,
       package: package(),
       elixirc_paths: elixirc_paths(Mix.env()),
 
@@ -22,7 +23,7 @@ defmodule LLMDb.MixProject do
       ],
 
       # Documentation
-      name: "LLM Models",
+      name: "LLM DB",
       source_url: @source_url,
       homepage_url: @source_url,
       source_ref: "v#{@version}",
@@ -70,13 +71,9 @@ defmodule LLMDb.MixProject do
     ]
   end
 
-  defp description do
-    "Fast, persistent_term-backed LLM model metadata catalog with explicit refresh controls"
-  end
-
   defp package do
     [
-      description: "Fast, persistent_term-backed LLM model metadata catalog",
+      description: @description,
       licenses: ["MIT"],
       maintainers: ["Mike Hostetler"],
       links: %{

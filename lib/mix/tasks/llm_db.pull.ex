@@ -1,4 +1,4 @@
-defmodule Mix.Tasks.LlmModels.Pull do
+defmodule Mix.Tasks.LlmDb.Pull do
   use Mix.Task
 
   @shortdoc "Pull latest data from all configured remote sources"
