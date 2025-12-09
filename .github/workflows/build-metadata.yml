@@ -85,22 +85,64 @@ jobs:
           fi
 
       - name: Generate summary
+        id: summary
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           set -euo pipefail
 
           MANIFEST_FILE="priv/llm_db/manifest.json"
           OUTPUT_FILE="${GITHUB_WORKSPACE}/metadata_summary.md"
+          COMMIT_FILE="${GITHUB_WORKSPACE}/commit_message.txt"
 
+          # Detect what changed
+          CHANGED_PROVIDERS=$(git diff --name-only priv/llm_db/providers/ 2>/dev/null | xargs -I{} basename {} .json | sort -u | head -10)
+          NEW_PROVIDERS=$(git diff --name-only --diff-filter=A priv/llm_db/providers/ 2>/dev/null | xargs -I{} basename {} .json | sort -u)
+          MODIFIED_PROVIDERS=$(git diff --name-only --diff-filter=M priv/llm_db/providers/ 2>/dev/null | xargs -I{} basename {} .json | sort -u)
+          
+          # Count changes
+          NEW_COUNT=$(echo "$NEW_PROVIDERS" | grep -c . || echo 0)
+          MOD_COUNT=$(echo "$MODIFIED_PROVIDERS" | grep -c . || echo 0)
+          TOTAL_CHANGED=$(echo "$CHANGED_PROVIDERS" | grep -c . || echo 0)
+          
+          # Build commit message (conventional format)
+          if [ "$NEW_COUNT" -gt 0 ] && [ "$MOD_COUNT" -gt 0 ]; then
+            COMMIT_TITLE="feat: update model metadata ($NEW_COUNT new, $MOD_COUNT updated)"
+          elif [ "$NEW_COUNT" -gt 0 ]; then
+            COMMIT_TITLE="feat: add $NEW_COUNT new provider(s)"
+          elif [ "$MOD_COUNT" -gt 0 ]; then
+            COMMIT_TITLE="fix: update model metadata for $MOD_COUNT provider(s)"
+          else
+            COMMIT_TITLE="chore: refresh model metadata"
+          fi
+          
+          # Build commit body with details
+          echo "$COMMIT_TITLE" > "$COMMIT_FILE"
+          echo "" >> "$COMMIT_FILE"
+          
+          if [ -n "$NEW_PROVIDERS" ] && [ "$NEW_PROVIDERS" != "" ]; then
+            echo "New providers:" >> "$COMMIT_FILE"
+            echo "$NEW_PROVIDERS" | head -5 | sed 's/^/- /' >> "$COMMIT_FILE"
+            [ "$NEW_COUNT" -gt 5 ] && echo "- ... and $((NEW_COUNT - 5)) more" >> "$COMMIT_FILE"
+            echo "" >> "$COMMIT_FILE"
+          fi
+          
+          if [ -n "$MODIFIED_PROVIDERS" ] && [ "$MODIFIED_PROVIDERS" != "" ]; then
+            echo "Updated providers:" >> "$COMMIT_FILE"
+            echo "$MODIFIED_PROVIDERS" | head -5 | sed 's/^/- /' >> "$COMMIT_FILE"
+            [ "$MOD_COUNT" -gt 5 ] && echo "- ... and $((MOD_COUNT - 5)) more" >> "$COMMIT_FILE"
+          fi
+          
+          # Output for PR title
+          echo "commit_title=$COMMIT_TITLE" >> "$GITHUB_OUTPUT"
+
+          # Build PR body
           echo "## Model Metadata Update" > "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
           echo "Automated metadata update from upstream sources." >> "$OUTPUT_FILE"
           echo "" >> "$OUTPUT_FILE"
 
           if [ -f "$MANIFEST_FILE" ]; then
-            if ! jq empty "$MANIFEST_FILE" >/dev/null 2>&1; then
-              echo "Warning: manifest.json is not valid JSON" >> "$OUTPUT_FILE"
-            else
+            if jq empty "$MANIFEST_FILE" >/dev/null 2>&1; then
               PROVIDER_COUNT=$(jq '.providers | length' "$MANIFEST_FILE")
               GENERATED_AT=$(jq -r '.generated_at' "$MANIFEST_FILE" || echo "unknown")
               MODEL_COUNT=$(find priv/llm_db/providers -name "*.json" -print0 \
@@ -109,11 +151,31 @@ jobs:
 
               echo "### Summary" >> "$OUTPUT_FILE"
               echo "" >> "$OUTPUT_FILE"
-              echo "- Providers: $PROVIDER_COUNT" >> "$OUTPUT_FILE"
-              echo "- Models: $MODEL_COUNT" >> "$OUTPUT_FILE"
-              echo "- Generated: $GENERATED_AT" >> "$OUTPUT_FILE"
+              echo "| Metric | Count |" >> "$OUTPUT_FILE"
+              echo "|--------|-------|" >> "$OUTPUT_FILE"
+              echo "| Total Providers | $PROVIDER_COUNT |" >> "$OUTPUT_FILE"
+              echo "| Total Models | $MODEL_COUNT |" >> "$OUTPUT_FILE"
+              echo "| New Providers | $NEW_COUNT |" >> "$OUTPUT_FILE"
+              echo "| Updated Providers | $MOD_COUNT |" >> "$OUTPUT_FILE"
+              echo "" >> "$OUTPUT_FILE"
+              echo "Generated: $GENERATED_AT" >> "$OUTPUT_FILE"
               echo "" >> "$OUTPUT_FILE"
             fi
+          fi
+          
+          if [ -n "$NEW_PROVIDERS" ] && [ "$NEW_PROVIDERS" != "" ]; then
+            echo "### New Providers" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+            echo "$NEW_PROVIDERS" | sed 's/^/- `/' | sed 's/$/`/' >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+          fi
+          
+          if [ -n "$MODIFIED_PROVIDERS" ] && [ "$MODIFIED_PROVIDERS" != "" ]; then
+            echo "### Updated Providers" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+            echo "$MODIFIED_PROVIDERS" | head -20 | sed 's/^/- `/' | sed 's/$/`/' >> "$OUTPUT_FILE"
+            [ "$MOD_COUNT" -gt 20 ] && echo "- ... and $((MOD_COUNT - 20)) more" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
           fi
 
           echo "### Changed Files" >> "$OUTPUT_FILE"
@@ -130,10 +192,10 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "Update model metadata"
+          commit-message-path: "commit_message.txt"
           committer: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
           author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
-          title: "Update model metadata - ${{ github.run_id }}"
+          title: "${{ steps.summary.outputs.commit_title }}"
           body-path: "metadata_summary.md"
           branch: "metadata-update"
           base: "main"
