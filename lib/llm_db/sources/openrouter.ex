@@ -364,13 +364,13 @@ defmodule LLMDB.Sources.OpenRouter do
 
   defp put_cost_if_present(map, key, value) when is_binary(value) do
     case Float.parse(value) do
-      {float_val, _} -> Map.put(map, key, float_val * 1_000_000)
+      {float_val, _} -> Map.put(map, key, Float.round(float_val * 1_000_000, 6))
       :error -> map
     end
   end
 
   defp put_cost_if_present(map, key, value) when is_number(value) do
-    Map.put(map, key, value * 1_000_000)
+    Map.put(map, key, Float.round(value * 1_000_000, 6))
   end
 
   defp put_cost_if_present(map, _key, _value), do: map
